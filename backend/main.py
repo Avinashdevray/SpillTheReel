@@ -1,58 +1,119 @@
-"""
-SpillTheReel – FastAPI Application Entry Point
+import os
+from dotenv import load_dotenv
 
-Configures CORS, mounts API routers, and starts the uvicorn server.
-"""
+# Load environment variables from .env
+load_dotenv()
 
-from fastapi import FastAPI
+# Disable backend access control to avoid multi-user handler conflicts
+os.environ["ENABLE_BACKEND_ACCESS_CONTROL"] = "false"
+
+import asyncio
+import tempfile
+import yt_dlp
+from fastapi import FastAPI, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
+from groq import Groq
+import cognee
+from cognee.modules.search.types.SearchType import SearchType
 
-from app.api.routes import ingest_router, search_router
+# Configure Cognee programmatically using Groq + Fastembed + Neo4j
+cognee.config.set_llm_provider("openai")
+cognee.config.set_llm_endpoint("https://api.groq.com/openai/v1")
+cognee.config.set_llm_api_key(os.getenv("GROQ_API_KEY"))
+cognee.config.set_llm_model("openai/llama-3.3-70b-versatile")
 
-app = FastAPI(
-    title="SpillTheReel API",
-    description="AI-powered audio-visual second brain – multimodal ingestion & Cognee graph memory.",
-    version="0.1.0",
-)
+# Use local fastembed for embeddings to avoid OpenAI rate limits
+cognee.config.set_embedding_provider("fastembed")
+cognee.config.set_embedding_model("BAAI/bge-small-en-v1.5")
+cognee.config.set_embedding_dimensions(384)
 
-# ---------------------------------------------------------------------------
-# CORS – allow local dev origins (Vite, React Native, Flutter, emulators)
-# ---------------------------------------------------------------------------
-ALLOWED_ORIGINS: list[str] = [
-    "http://localhost:3000",
-    "http://localhost:5173",
-    "http://localhost:8081",      # React Native Metro
-    "http://localhost:19006",     # Expo web
-    "http://10.0.2.2:8000",      # Android emulator → host
-    "http://127.0.0.1:5173",
-    "http://127.0.0.1:3000",
-]
+# Configure Neo4j Graph DB connection
+cognee.config.set_graph_database_provider("neo4j")
+cognee.config.set_graph_db_config({
+    "graph_database_url": os.getenv("NEO4J_URI"),
+    "graph_database_username": os.getenv("NEO4J_USERNAME"),
+    "graph_database_password": os.getenv("NEO4J_PASSWORD")
+})
+cognee.config.set_vector_db_provider("lancedb")
 
+
+app = FastAPI(title="SpillTheReel API", version="0.1.0")
+
+# Allow requests from the Expo mobile app (any origin for dev)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=ALLOWED_ORIGINS,
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# ---------------------------------------------------------------------------
-# Routers
-# ---------------------------------------------------------------------------
-app.include_router(ingest_router, prefix="/api/v1/ingest", tags=["Ingestion"])
-app.include_router(search_router, prefix="/api/v1/search", tags=["Search"])
+# Initialize Groq client for Whisper transcription
+groq_client = Groq(api_key=os.getenv("GROQ_API_KEY"))
 
 
-@app.get("/", tags=["Health"])
-async def root() -> dict[str, str]:
-    """Health-check / landing endpoint."""
-    return {"status": "ok", "service": "SpillTheReel API"}
+class ReelRequest(BaseModel):
+    url: str
 
 
-# ---------------------------------------------------------------------------
-# Run with: uvicorn main:app --host 0.0.0.0 --port 8000 --reload
-# ---------------------------------------------------------------------------
-if __name__ == "__main__":
-    import uvicorn
+async def process_reel_pipeline(url: str):
+    """
+    Full pipeline: download audio → transcribe → ingest into Cognee knowledge graph.
+    This runs as a background task so the mobile app doesn't hang.
+    """
+    # STEP 1: Download Audio using yt-dlp
+    with tempfile.TemporaryDirectory() as tmpdir:
+        audio_path = os.path.join(tmpdir, "audio.mp3")
+        ydl_opts = {
+            "format": "bestaudio/best",
+            "outtmpl": audio_path,
+            "quiet": True,
+            "cookiesfrombrowser": ("chrome",),  # Uses your Chrome Instagram login
+        }
+        print(f"[1/3] Downloading audio from: {url}")
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            ydl.download([url])
 
-    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
+        # STEP 2: Transcribe with Groq (Whisper)
+        print("[2/3] Transcribing audio with Groq Whisper...")
+        with open(audio_path, "rb") as file:
+            transcription = groq_client.audio.transcriptions.create(
+                file=(audio_path, file.read()),
+                model="whisper-large-v3",
+                response_format="text",
+            )
+        print(f"[2/3] Transcript: {transcription[:200]}...")
+
+    # STEP 3: Ingest into Cognee Memory Graph
+    # Prefix the text with the URL so we have a reference
+    document_text = f"Source URL: {url}\n\nTranscript: {transcription}"
+
+    print("[3/3] Ingesting into Cognee knowledge graph...")
+    # cognee.add creates the dataset
+    await cognee.add(document_text, "reel_knowledge")
+
+    # cognee.cognify extracts entities, relationships, and vectors
+    await cognee.cognify("reel_knowledge")
+    print(f"✅ Successfully memorized Reel: {url}")
+
+
+@app.post("/ingest")
+async def ingest_reel(req: ReelRequest, background_tasks: BackgroundTasks):
+    """Accept a reel URL and process it in the background."""
+    background_tasks.add_task(process_reel_pipeline, req.url)
+    return {"status": "processing", "message": "Reel is being added to memory."}
+
+
+@app.get("/chat")
+async def query_memory(q: str):
+    """Query the Cognee knowledge graph with natural language."""
+    # query_type can be SearchType.HYBRID_COMPLETION, SearchType.GRAPH_COMPLETION, etc.
+    results = await cognee.search(q, query_type=SearchType.HYBRID_COMPLETION)
+    return {"query": q, "response": results}
+
+
+@app.get("/health")
+async def health_check():
+    """Simple health check endpoint."""
+    return {"status": "ok", "service": "SpillTheReel Backend"}
