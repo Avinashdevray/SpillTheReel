@@ -1,0 +1,1 @@
+# SpillTheReel – core package

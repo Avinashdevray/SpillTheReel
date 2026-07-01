@@ -1,0 +1,25 @@
+# SpillTheReel – Backend Dependencies
+
+# API framework
+fastapi>=0.110.0
+uvicorn>=0.28.0
+pydantic>=2.6.0
+
+# Knowledge graph / memory
+cognee>=1.0.0
+
+# Video download
+yt-dlp
+
+# Audio transcription (WhisperX-compatible)
+faster-whisper
+
+# OCR
+easyocr
+
+# Scene detection
+scenedetect
+
+# Utilities
+python-dotenv>=1.0.0
+python-multipart>=0.0.9
