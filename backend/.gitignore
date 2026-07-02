@@ -2,7 +2,24 @@
 venv/
 __pycache__/
 *.pyc
+*.pyo
+*.pyd
+*.db
+*.sqlite3
+
+# Environment & secrets — NEVER commit these
 .env
+cookies.txt
+
+# LanceDB + Cognee local data stores
+.lancedb/
+lancedb/
+.cognee_data/
+
+# IDE
+.vscode/
+.idea/
 
 # OS
 .DS_Store
+Thumbs.db

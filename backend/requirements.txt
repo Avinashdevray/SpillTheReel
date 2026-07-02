@@ -4,6 +4,7 @@ cognee
 yt-dlp
 groq
 openai
+google-genai
 python-dotenv
 pydantic
 neo4j
