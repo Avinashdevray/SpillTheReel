@@ -3,31 +3,31 @@ app/api/routes.py — API endpoints for SpillTheReel.
 
 Endpoints:
   POST /ingest   — Accept a reel URL, kick off background multimodal pipeline.
-  GET  /chat     — Query the Cognee knowledge graph with natural language.
-
-Pipeline order (background task):
-  1. download_video       — yt-dlp + cookies.txt → local MP4 + temp dir handle
-  2. transcribe_audio     — Groq Whisper → plain-text transcript
-  3. extract_visual_context — Gemini 1.5 Flash → visual summary
-  4. generate_unified_summary — Groq Llama 3.3 → merged cohesive paragraph
-  5. save_to_memory        — Cognee → Neo4j knowledge graph
-  [cleanup] tmpdir.cleanup() — always executed in a finally block
+  GET  /chat     — Query the user-isolated database with keyword search.
+  GET  /share-target — Share sheet landing route from Instagram.
 """
 
 import logging
+import asyncio
+import re
 from typing import Optional
 
-from fastapi import APIRouter, BackgroundTasks, HTTPException
+from fastapi import APIRouter, HTTPException, Depends, Request, BackgroundTasks
+from fastapi.responses import RedirectResponse
 from pydantic import BaseModel
+import firebase_admin
+from firebase_admin import auth as firebase_auth
 
 from app.services.ingestion import download_video, transcribe_audio
 from app.services.visual_audio import extract_visual_context
-from app.services.brain import generate_unified_summary, save_to_memory, query_memory
+from app.services.brain import generate_unified_summary, save_to_memory
+from app.services.repository import get_neo4j_driver, GraphRepository
 
 logger = logging.getLogger("spillthereel.routes")
 
 router = APIRouter()
 
+REEL_PATTERN = re.compile(r'https?://(?:www\.)?instagram\.com/(?:reel|reels|p)/[A-Za-z0-9_-]+/?[^\s&]*')
 
 # ---------------------------------------------------------------------------
 # Request / Response schemas
@@ -49,29 +49,52 @@ class ChatResponse(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# Authentication Dependencies
+# ---------------------------------------------------------------------------
+
+async def get_current_uid(request: Request) -> str:
+    """Dependency to extract and verify the Firebase ID Token from headers or cookies."""
+    token = request.cookies.get("session") or request.headers.get("Authorization", "").replace("Bearer ", "")
+    if not token:
+        raise HTTPException(status_code=401, detail="Authentication token is missing. Please log in.")
+    try:
+        decoded = firebase_auth.verify_id_token(token)
+        return decoded["uid"]
+    except Exception as exc:
+        logger.error(f"[AuthError] Token verification failed: {exc}")
+        raise HTTPException(status_code=401, detail=f"Invalid or expired credentials: {exc}")
+
+
+def get_repo(uid: str = Depends(get_current_uid)) -> GraphRepository:
+    """Dependency to instantiate the GraphRepository bound to the current user's UID."""
+    driver = get_neo4j_driver()
+    return GraphRepository(driver, uid)
+
+
+# ---------------------------------------------------------------------------
 # Background multimodal pipeline
 # ---------------------------------------------------------------------------
 
-async def _run_ingest_pipeline(url: str) -> None:
+async def _run_ingest_pipeline(url: str, uid: str) -> None:
     """
     Full multimodal background pipeline:
       1. Download video (MP4) via yt-dlp + cookies.txt.
       2. Transcribe audio with Groq Whisper.
       3. Extract visual context with Gemini 1.5 Flash.
       4. Merge into a unified summary with Groq Llama 3.3.
-      5. Persist the summary to Cognee / Neo4j.
+      5. Persist to Cognee knowledge graph and user-isolated Neo4j DB.
 
     All errors are caught and logged to stderr with their specific type.
     The local temp directory is ALWAYS cleaned up in the finally block.
     This function must NOT raise — BackgroundTasks silently drops exceptions.
     """
-    logger.info(f"[Pipeline] ▶ Starting multimodal ingestion for: {url}")
+    logger.info(f"[Pipeline] ▶ Starting user-isolated ingestion for: {url} (user: {uid})")
 
     # ------------------------------------------------------------------
     # Step 1: Download video — obtain temp dir handle for explicit cleanup
     # ------------------------------------------------------------------
     try:
-        video_path, tmpdir = await download_video(url)
+        video_path, tmpdir, metadata = await download_video(url)
     except FileNotFoundError as exc:
         logger.error(
             f"[AuthenticationError] cookies.txt missing — cannot download '{url}'. "
@@ -115,7 +138,7 @@ async def _run_ingest_pipeline(url: str) -> None:
             return
 
         # ------------------------------------------------------------------
-        # Step 3: Extract visual context with Gemini 1.5 Flash
+        # Step 3: Extract visual context with Gemini 1.5/2.0 Flash
         # ------------------------------------------------------------------
         logger.info(f"[Pipeline] [3/5] Extracting visual context via Gemini: {url}")
         try:
@@ -152,21 +175,36 @@ async def _run_ingest_pipeline(url: str) -> None:
             unified_summary = transcript
 
         # ------------------------------------------------------------------
-        # Step 5: Save to Cognee knowledge graph
+        # Step 5: Save to Cognee and Neo4j User isolated structure
         # ------------------------------------------------------------------
-        logger.info(f"[Pipeline] [5/5] Saving to Cognee knowledge graph: {url}")
+        logger.info(f"[Pipeline] [5/5] Saving to Cognee knowledge graph and Neo4j for user {uid}: {url}")
         try:
+            # 1. Save to Cognee graph (global search, entities if available)
             await save_to_memory(url=url, unified_summary=unified_summary)
-            logger.info(f"[Pipeline] ✅ Successfully memorized: {url}")
+        except Exception as exc:
+            logger.warning(f"[Pipeline] Cognee save warning (non-fatal): {exc}")
+
+        try:
+            # 2. Save directly to User node and isolated Reel node in Neo4j
+            driver = get_neo4j_driver()
+            repo = GraphRepository(driver, uid)
+            repo.save_reel(
+                url=url, 
+                transcript=transcript, 
+                summary=unified_summary,
+                author=metadata.get("author", ""),
+                thumbnail=metadata.get("thumbnail", "")
+            )
+            logger.info(f"[Pipeline] ✅ Successfully memorized in user-isolated graph: {url}")
         except ConnectionError as exc:
             logger.error(
-                f"[DatabaseConnectionError] Neo4j unreachable while saving '{url}'. "
+                f"[DatabaseConnectionError] Neo4j unreachable while saving user isolated '{url}'. "
                 f"Details: {exc}",
                 exc_info=True,
             )
         except Exception as exc:
             logger.error(
-                f"[MemoryError:{type(exc).__name__}] Failed to store summary for '{url}'. "
+                f"[MemoryError:{type(exc).__name__}] Failed to store isolated summary for '{url}'. "
                 f"Details: {exc}",
                 exc_info=True,
             )
@@ -187,39 +225,31 @@ async def _run_ingest_pipeline(url: str) -> None:
 # ---------------------------------------------------------------------------
 
 @router.post("/ingest", response_model=IngestResponse, tags=["Ingestion"])
-async def ingest_reel(req: IngestRequest, background_tasks: BackgroundTasks):
+async def ingest_reel(req: IngestRequest, repo: GraphRepository = Depends(get_repo)):
     """
-    Accept a reel/video URL and asynchronously process it via the multimodal pipeline.
+    Accept a reel/video URL and asynchronously process it via the user-isolated pipeline.
 
-    Returns immediately with an acknowledgement. All processing (download,
-    transcription, visual extraction, graph storage) happens in the background.
-    Monitor server logs (stderr) for step-by-step progress.
+    Returns immediately with an acknowledgement.
     """
     if not req.url or not req.url.strip():
         raise HTTPException(status_code=422, detail="url field must not be empty.")
 
-    background_tasks.add_task(_run_ingest_pipeline, req.url.strip())
-    logger.info(f"[Ingest] ✉ Queued multimodal pipeline for: {req.url}")
+    url_str = req.url.strip()
+    asyncio.create_task(_run_ingest_pipeline(url_str, repo.uid))
+    logger.info(f"[Ingest] ✉ Queued user-isolated pipeline for: {url_str} (user: {repo.uid})")
     return IngestResponse(
         status="processing",
         message=(
-            f"Reel '{req.url}' is being processed (download → transcribe → "
+            f"Reel '{url_str}' is being processed (download → transcribe → "
             "visual extract → summarise → memorise). Check server logs for progress."
         ),
     )
 
 
 @router.get("/chat", response_model=ChatResponse, tags=["Query"])
-async def chat_query(q: Optional[str] = None):
+async def chat_query(q: Optional[str] = None, repo: GraphRepository = Depends(get_repo)):
     """
-    Query the Cognee knowledge graph with a natural language question.
-
-    The graph contains unified multimodal summaries (audio + visual) of all
-    ingested reels, so questions about on-screen text, objects, or actions
-    are fully supported.
-
-    GUARANTEE: This endpoint ALWAYS returns HTTP 200. Errors are surfaced
-    as a friendly string inside the JSON `response` field, never as 4xx/5xx.
+    Query the user-isolated Neo4j database with a keyword.
     """
     if not q or not q.strip():
         raise HTTPException(
@@ -228,10 +258,10 @@ async def chat_query(q: Optional[str] = None):
         )
 
     question = q.strip()
-    logger.info(f"[Chat] Received query: '{question}'")
+    logger.info(f"[Chat] Received query: '{question}' for user {repo.uid}")
 
     try:
-        results = await query_memory(question)
+        results = repo.query_reels(question)
     except ConnectionError as exc:
         logger.error(
             f"[DatabaseConnectionError] Neo4j unreachable during query. Details: {exc}",
@@ -239,7 +269,7 @@ async def chat_query(q: Optional[str] = None):
         )
         return ChatResponse(
             query=question,
-            response="The knowledge graph is temporarily unavailable. Please try again in a moment.",
+            response={"text": "The knowledge graph is temporarily unavailable. Please try again in a moment.", "reels": []},
         )
     except Exception as exc:
         logger.error(
@@ -248,18 +278,58 @@ async def chat_query(q: Optional[str] = None):
         )
         return ChatResponse(
             query=question,
-            response="Something went wrong while searching. Please try again or re-ingest the Reel.",
+            response={"text": "Something went wrong while searching. Please try again or re-ingest the Reel.", "reels": []},
         )
 
-    # Handle the empty-graph sentinel returned by brain.py
-    if results == "__EMPTY_GRAPH__":
-        logger.info(f"[Chat] Empty graph sentinel received for query: '{question}'")
+    if not results:
+        # Check if the user has any reels at all
+        try:
+            all_reels = repo.get_all_reels()
+            if not all_reels:
+                return ChatResponse(
+                    query=question,
+                    response={
+                        "text": "My memory is empty! Please add a Reel first using the /ingest endpoint, then ask me again.",
+                        "reels": []
+                    }
+                )
+        except Exception:
+            pass
         return ChatResponse(
             query=question,
-            response=(
-                "My memory is empty! Please add a Reel first using the /ingest endpoint, "
-                "then ask me again."
-            ),
+            response={"text": "I couldn't find any reels matching that query in your collection.", "reels": []}
         )
 
-    return ChatResponse(query=question, response=results)
+    # Use the top result only
+    top_reel = results[0]
+    
+    # Generate a conversational answer based on the top reel
+    from app.services.brain import generate_chat_answer
+    answer = await generate_chat_answer(question, top_reel)
+
+    response_data = {
+        "text": answer,
+        "reels": [top_reel]
+    }
+
+    return ChatResponse(query=question, response=response_data)
+
+
+@router.get("/share-target")
+async def share_target(request: Request, background_tasks: BackgroundTasks, repo: GraphRepository = Depends(get_repo)):
+    """
+    Instagram share sheet Web Share Target landing endpoint.
+    Extracts Reel URL from url or text parameters, queues the ingestion task,
+    and redirects the client to the frontend home.
+    """
+    params = request.query_params
+    print("SHARE TARGET RECEIVED:", dict(params))
+
+    candidate = params.get("url", "") + " " + params.get("text", "")
+    match = REEL_PATTERN.search(candidate)
+
+    if match:
+        background_tasks.add_task(_run_ingest_pipeline, match.group(0), repo.uid)
+        return RedirectResponse(url="/?saved=1")
+
+    return RedirectResponse(url="/?error=no_reel_found")

@@ -92,6 +92,42 @@ Do not use bullet points or headings. Output only the paragraph, nothing else.
     return unified_summary
 
 
+async def generate_chat_answer(question: str, reel: dict) -> str:
+    from groq import Groq
+
+    api_key = os.getenv("GROQ_API_KEY")
+    if not api_key:
+        return "I found this reel, but I need a Groq API key to answer your question."
+
+    groq_client = Groq(api_key=api_key)
+
+    prompt = f"""\
+You are an AI assistant helping a user find information from their saved video reels.
+The user asked: "{question}"
+
+Here is the transcript and summary of the most relevant reel:
+Author: {reel.get('author', 'Unknown')}
+Summary:
+{reel.get('summary', '')}
+
+Transcript:
+{reel.get('transcript', '')}
+
+Answer the user's question directly using the information from this reel. Include the author's username in your response. Be concise and helpful. Do not use markdown headers, but you can use links or bold text.
+"""
+    try:
+        response = groq_client.chat.completions.create(
+            model=_MERGE_MODEL,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.3,
+            max_tokens=512,
+        )
+        return response.choices[0].message.content.strip()
+    except Exception as exc:
+        logger.error(f"[ChatAnswerError] {exc}")
+        return "I found this reel that matches your query!"
+
+
 async def save_to_memory(url: str, unified_summary: str) -> None:
     """
     Persist a reel's unified multimodal summary into the Cognee knowledge graph.
@@ -126,11 +162,21 @@ async def save_to_memory(url: str, unified_summary: str) -> None:
     except Exception as exc:
         _raise_typed(exc, context=f"cognee.add for '{url}'")
 
-    logger.info(f"[Brain] [2/2] Running cognify on dataset '{_DATASET_NAME}'...")
+    logger.info(f"[Brain] [2/2] Attempting entity extraction (cognify) for '{url}'...")
     try:
         await cognee.cognify(_DATASET_NAME)
+        logger.info(f"[Brain] ✅ Entity extraction complete for '{url}'")
     except Exception as exc:
-        _raise_typed(exc, context=f"cognee.cognify for '{url}'")
+        # cognify fails when:
+        # - The LLM backend doesn't support structured output (Groq Llama 3.3)
+        # - The LLM API key has insufficient credits (Bluesmind)
+        # - Any other provider-side issue
+        # The document is already stored via cognee.add(), so search still works.
+        logger.warning(
+            f"[Brain] cognify skipped for '{url}' — entity extraction requires "
+            f"a function-calling-capable model (e.g. gpt-4o via Bluesmind). "
+            f"Falling back to document-only storage. Root: {type(exc).__name__}: {exc}"
+        )
 
     logger.info(f"[Brain] ✅ Knowledge graph updated for: {url}")
 

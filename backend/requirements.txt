@@ -9,3 +9,5 @@ python-dotenv
 pydantic
 neo4j
 fastembed
+firebase-admin
+httpx
