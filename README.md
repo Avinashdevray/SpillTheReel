@@ -38,6 +38,14 @@
 
 **Step 4:** Ask natural-language questions about your saved reels
 
+✨ Never worry about forgetting a saved reel again  
+✓ AI-powered semantic search  
+✓ Cognee memory layer for long-term knowledge  
+✓ Understands context, not just keywords  
+✓ Natural language queries  
+✓ Instant recall from thousands of saved reels  
+✓ Turns endless scrolling into searchable knowledge
+
 </td>
 <td valign="top" width="50%" align="center">
   <img src="installguide.gif" alt="Install guide - how to install SpillTheReel PWA" width="300"/>
@@ -133,7 +141,4 @@ Cognee Cloud is the backbone of SpillTheReel's memory layer:
 
 - **Import Old Saved Reels** — A one-click tool to re-ingest all previously saved reels (from before the Cognee Cloud migration) into the new memory system. Scans Neo4j for orphaned metadata and re-runs them through the pipeline so every reel is searchable via Cognee Cloud.
 
-## License
 
-Built with ❤️ for the Cognee AI Hackathon.  
-© 2026 SpillTheReel. All rights reserved.
