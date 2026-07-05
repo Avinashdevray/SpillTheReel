@@ -5,7 +5,7 @@
 <h1 align="center">SpillTheReel</h1>
 
 <p align="center">
-  <strong>Your AI-Powered Second Brain for Instagram Reels</strong>
+  <strong>Turn doomscrolling into instant recall</strong>
   <br>
   Share a Reel → AI ingests it → Ask questions about what you've watched
 </p>
@@ -40,10 +40,15 @@
 
 ✨ Never worry about forgetting a saved reel again  
 ✓ AI-powered semantic search  
+
 ✓ Cognee memory layer for long-term knowledge  
+
 ✓ Understands context, not just keywords  
+
 ✓ Natural language queries  
+
 ✓ Instant recall from thousands of saved reels  
+
 ✓ Turns endless scrolling into searchable knowledge
 
 </td>
@@ -67,10 +72,15 @@
 ## Features
 
 - **🧠 AI-Powered Ingestion** — Downloads the reel, transcribes audio (Groq Whisper), extracts visual context (Gemini + Bluesmind), and generates a unified multimodal summary (Groq Llama 3.3)
+- 
 - **🔍 Semantic Search** — Powered by **Cognee Cloud**, which handles vector embeddings, knowledge graph construction, and entity extraction automatically. Your reels become searchable by meaning, not just keywords
+- 
 - **📱 Installable PWA** — Works offline-capable, share sheet integration from Instagram, feels like a native app
+- 
 - **🔒 User Isolation** — Every user's data is scoped to their own Cognee dataset (`reel_knowledge_{uid}`). You only see your own reels
+- 
 - **📊 Graph Storage** — Neo4j AuraDB stores reel metadata with full-text search fallback
+- 
 - **⚡ Real-time Progress** — Polling-based job status so you always know where your reel is in the pipeline
 
 ---
@@ -94,6 +104,7 @@ Ask a question → GET /chat?q=...
                     └─ 3. Groq Llama 3.3 (natural-language answer)
 ```
 
+
 ---
 
 ## Architecture
@@ -112,6 +123,7 @@ Ask a question → GET /chat?q=...
 
 ---
 
+
 ## Why Cognee Cloud?
 
 Cognee Cloud is the backbone of SpillTheReel's memory layer:
@@ -122,6 +134,7 @@ Cognee Cloud is the backbone of SpillTheReel's memory layer:
 - **No LLM Ops** — Cognee Cloud handles all LLM calls (embeddings, entity extraction, query completion) internally. No API keys to manage, no litellm timeouts.
 
 ---
+
 
 ## Tech Stack
 
