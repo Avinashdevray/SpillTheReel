@@ -4,18 +4,22 @@ from unittest.mock import patch, MagicMock, AsyncMock
 
 
 class TestGenerateUnifiedSummary:
+    @patch("app.services.groq_utils.get_keys")
     @patch("app.services.brain.os.getenv")
-    def test_missing_api_key(self, mock_getenv):
-        mock_getenv.return_value = None
+    def test_missing_api_key(self, mock_brain_getenv, mock_get_keys):
+        mock_brain_getenv.return_value = None
+        mock_get_keys.return_value = (None, None)
         from app.services.brain import generate_unified_summary
         import asyncio
-        with pytest.raises(RuntimeError, match="GROQ_API_KEY"):
+        with pytest.raises(RuntimeError, match="No GROQ_API_KEY or GROQ_API_KEY2"):
             asyncio.run(generate_unified_summary("audio transcript", "visual context"))
 
+    @patch("app.services.groq_utils.get_keys")
     @patch("app.services.brain.os.getenv")
     @patch("groq.Groq")
-    def test_summary_success(self, mock_groq, mock_getenv):
-        mock_getenv.return_value = "test-groq-key"
+    def test_summary_success(self, mock_groq, mock_brain_getenv, mock_get_keys):
+        mock_brain_getenv.return_value = "test-groq-key"
+        mock_get_keys.return_value = ("test-groq-key", None)
         mock_client = MagicMock()
         mock_groq.return_value = mock_client
         mock_response = MagicMock()
@@ -27,10 +31,12 @@ class TestGenerateUnifiedSummary:
         result = asyncio.run(generate_unified_summary("audio transcript", "visual context"))
         assert result == "Unified summary paragraph."
 
+    @patch("app.services.groq_utils.get_keys")
     @patch("app.services.brain.os.getenv")
     @patch("groq.Groq")
-    def test_summary_api_error(self, mock_groq, mock_getenv):
-        mock_getenv.return_value = "test-groq-key"
+    def test_summary_api_error(self, mock_groq, mock_brain_getenv, mock_get_keys):
+        mock_brain_getenv.return_value = "test-groq-key"
+        mock_get_keys.return_value = ("test-groq-key", None)
         mock_client = MagicMock()
         mock_groq.return_value = mock_client
         mock_client.chat.completions.create.side_effect = Exception("API error")

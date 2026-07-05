@@ -53,7 +53,7 @@
 
 </td>
 <td valign="top" width="50%" align="center">
-  <img src="installguide.gif" alt="Install guide - how to install SpillTheReel PWA" width="300"/>
+  <img src="assets/installguide.gif" alt="Install guide - how to install SpillTheReel PWA" width="300"/>
 </td>
 </tr>
 </table>
@@ -64,7 +64,7 @@
 
 | Ingest a Reel | Search Your Memory | Full Walkthrough |
 |:---:|:---:|:---:|
-| <img src="ss1.jpg" alt="Ingesting a Reel" width="260"/> | <img src="ss2.jpg" alt="Searching saved Reels" width="260"/> | <img src="use.gif" alt="Using SpillTheReel" width="260"/> |
+| <img src="assets/ss1.jpg" alt="Ingesting a Reel" width="260"/> | <img src="assets/ss2.jpg" alt="Searching saved Reels" width="260"/> | <img src="assets/use.gif" alt="Using SpillTheReel" width="260"/> |
 | Share a URL, AI extracts everything | Ask questions, get grounded answers | Install → ingest → search in 30s |
 
 ---

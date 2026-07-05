@@ -69,7 +69,7 @@ class TestExtractVisualContext:
 
         from app.services.visual_audio import extract_visual_context
         import asyncio
-        with pytest.raises(RuntimeError, match="Gemini reported FAILED state"):
+        with pytest.raises(RuntimeError, match="Gemini reported FAILED"):
             asyncio.run(extract_visual_context(mock_video_path))
 
 

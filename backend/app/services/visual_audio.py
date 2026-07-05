@@ -1,24 +1,14 @@
 """
-app/services/visual_audio.py — Gemini 1.5 Flash visual context extraction service.
+app/services/visual_audio.py — Gemini 2.0 Flash visual context extraction service.
 
-Uses the NEW `google-genai` SDK (google.genai), NOT the deprecated
-`google-generativeai` (google.generativeai) package.
+Uses Gemini as the primary provider. Falls back to Bluesmind (mimo-v2.5 vision via
+frame extraction) only when Gemini returns a 429 quota-exhausted error.
 
-Responsibilities:
-  - Upload a local video file to the Gemini Files API.
-  - Poll until the file state transitions from PROCESSING → ACTIVE.
-  - Generate a structured visual summary (on-screen text, objects, actions).
-  - Delete the uploaded file from Gemini servers after use (guardrail).
-  - Fall back to Bluesmind (gpt-4o vision) when Gemini quota is exhausted.
-
-Design constraints:
-  - The genai.Client is instantiated INSIDE each function — never at module level.
-  - Raises RuntimeError with a clear label on any Gemini-side failure.
-  - _safe_delete() suppresses all errors — cleanup never crashes the pipeline.
+All blocking I/O (Gemini SDK calls, ffmpeg subprocess) is offloaded to
+asyncio.to_thread to avoid freezing the event loop.
 """
 
 import os
-import re
 import asyncio
 import subprocess
 import base64
@@ -28,13 +18,9 @@ import httpx
 
 logger = logging.getLogger("spillthereel.visual")
 
-# ---------------------------------------------------------------------------
-# Constants
-# ---------------------------------------------------------------------------
-
 _GEMINI_MODEL = "gemini-2.0-flash"
 _POLL_INTERVAL_SECONDS = 3
-_POLL_MAX_ATTEMPTS = 40          # 40 × 3 s = 2-minute timeout
+_POLL_MAX_ATTEMPTS = 40
 _VISUAL_PROMPT = """\
 You are analyzing a short-form video (Reel / TikTok / YouTube Short).
 Provide a concise but thorough summary covering:
@@ -51,51 +37,53 @@ _BLUESMIND_ENDPOINT = "https://api.bluesminds.com/v1/"
 _FRAMES_TO_EXTRACT = 3
 
 
-# ---------------------------------------------------------------------------
-# Public API
-# ---------------------------------------------------------------------------
-
 async def extract_visual_context(video_path: str) -> str:
-    """
-    Upload *video_path* to Gemini Files API and generate a visual summary.
+    if not video_path or not os.path.isfile(video_path):
+        logger.warning("[Visual] No valid video file provided. Skipping visual extraction.")
+        return ""
 
-    Uses the `google-genai` SDK (from google import genai).
-    The client is created INSIDE this function to prevent module-level crashes.
+    from google import genai
 
-    Args:
-        video_path: Absolute path to the locally downloaded MP4 file.
-
-    Returns:
-        A plain-text visual summary string.
-
-    Raises:
-        RuntimeError: On missing API key, upload failure, polling timeout,
-                      or generation failure.
-    """
-    from google import genai                        # new SDK — deferred import
-    from google.genai import types as genai_types  # for FileState enum
+    api_key = os.getenv("GEMINI_API_KEY")
+    if api_key:
+        try:
+            return await _extract_via_gemini(video_path, api_key)
+        except RuntimeError as exc:
+            exc_msg = str(exc)
+            if "429" in exc_msg or "RESOURCE_EXHAUSTED" in exc_msg or "quota" in exc_msg.lower():
+                bluesmind_key = os.getenv("BLUESMIND")
+                if bluesmind_key:
+                    logger.warning("[Visual] Gemini quota exhausted. Falling back to Bluesmind vision...")
+                    try:
+                        return await _extract_via_bluesmind(video_path, bluesmind_key)
+                    except Exception as bluesmind_exc:
+                        logger.error(f"[Visual] Bluesmind fallback also failed: {bluesmind_exc}. Proceeding without visual context.")
+                        return ""
+            logger.warning(f"[Visual] Gemini extraction failed (non-quota): {exc}. Proceeding without visual context.")
+            return ""
 
     bluesmind_key = os.getenv("BLUESMIND")
     if bluesmind_key:
-        logger.info("[Visual] Using Bluesmind (gpt-4o) for visual extraction.")
-        return await _extract_via_bluesmind(video_path, bluesmind_key)
+        logger.info("[Visual] No Gemini API key. Using Bluesmind (mimo-v2.5) for visual extraction.")
+        try:
+            return await _extract_via_bluesmind(video_path, bluesmind_key)
+        except Exception as exc:
+            logger.error(f"[Visual] Bluesmind extraction failed: {exc}. Proceeding without visual context.")
+            return ""
 
-    api_key = os.getenv("GEMINI_API_KEY")
-    if not api_key:
-        raise RuntimeError(
-            "[ConfigurationError] GEMINI_API_KEY environment variable is not set. "
-            "Add it to backend/.env."
-        )
+    logger.warning("[Visual] No visual provider configured. Proceeding without visual context.")
+    return ""
 
-    # Client is created here — NOT at module level
+
+async def _extract_via_gemini(video_path: str, api_key: str) -> str:
+    from google import genai
+
     client = genai.Client(api_key=api_key)
 
-    # ------------------------------------------------------------------
-    # Step 1: Upload video to Gemini Files API
-    # ------------------------------------------------------------------
     logger.info(f"[Visual] Uploading video to Gemini Files API: {video_path}")
     try:
-        gemini_file = client.files.upload(
+        gemini_file = await asyncio.to_thread(
+            client.files.upload,
             file=video_path,
             config={"display_name": os.path.basename(video_path)},
         )
@@ -106,22 +94,17 @@ async def extract_visual_context(video_path: str) -> str:
 
     logger.info(f"[Visual] Upload initiated. Gemini file name: {gemini_file.name}")
 
-    # ------------------------------------------------------------------
-    # Step 2: Poll until file state is ACTIVE
-    # ------------------------------------------------------------------
     logger.info("[Visual] Polling Gemini for file processing state...")
-    file_ref = gemini_file  # will be refreshed each iteration
-
+    file_ref = gemini_file
     for attempt in range(1, _POLL_MAX_ATTEMPTS + 1):
         try:
-            file_ref = client.files.get(name=gemini_file.name)
+            file_ref = await asyncio.to_thread(client.files.get, name=gemini_file.name)
         except Exception as exc:
+            await asyncio.to_thread(_safe_delete, client, gemini_file.name)
             raise RuntimeError(
-                f"[GeminiPollError] Failed to poll file status on attempt {attempt}: {exc}"
+                f"[GeminiPollError] Failed to poll file status: {exc}"
             ) from exc
 
-        # file_ref.state is a FileState enum; .name gives the string value
-        # The google-genai SDK returns short names ('ACTIVE', 'PROCESSING', 'FAILED')
         state = file_ref.state.name
         logger.info(f"[Visual] Poll {attempt}/{_POLL_MAX_ATTEMPTS} — state: {state}")
 
@@ -129,84 +112,48 @@ async def extract_visual_context(video_path: str) -> str:
             logger.info("[Visual] File is ACTIVE. Proceeding to generation.")
             break
         elif state == "FAILED":
-            _safe_delete(client, gemini_file.name)
+            await asyncio.to_thread(_safe_delete, client, gemini_file.name)
             raise RuntimeError(
-                f"[GeminiProcessingError] Gemini reported FAILED state for '{video_path}'. "
-                "The video may be corrupt or in an unsupported format."
+                f"[GeminiProcessingError] Gemini reported FAILED for '{video_path}'."
             )
 
         if attempt == _POLL_MAX_ATTEMPTS:
-            _safe_delete(client, gemini_file.name)
+            await asyncio.to_thread(_safe_delete, client, gemini_file.name)
             raise RuntimeError(
                 f"[GeminiTimeoutError] File did not become ACTIVE within "
-                f"{_POLL_MAX_ATTEMPTS * _POLL_INTERVAL_SECONDS}s for '{video_path}'."
+                f"{_POLL_MAX_ATTEMPTS * _POLL_INTERVAL_SECONDS}s."
             )
 
         await asyncio.sleep(_POLL_INTERVAL_SECONDS)
 
-    # ------------------------------------------------------------------
-    # Step 3: Generate visual context
-    # ------------------------------------------------------------------
     logger.info(f"[Visual] Generating visual context with Gemini {_GEMINI_MODEL}...")
     try:
-        response = client.models.generate_content(
+        response = await asyncio.to_thread(
+            client.models.generate_content,
             model=_GEMINI_MODEL,
             contents=[file_ref, _VISUAL_PROMPT],
         )
         visual_summary = response.text
-        _safe_delete(client, gemini_file.name)
-        logger.info(f"[Visual] Visual summary preview: {visual_summary[:200]}...")
+        await asyncio.to_thread(_safe_delete, client, gemini_file.name)
+        logger.info(f"[Visual] Gemini summary preview: {visual_summary[:200]}...")
         return visual_summary
     except Exception as exc:
-        _safe_delete(client, gemini_file.name)
-        exc_msg = str(exc)
-        if "429" in exc_msg or "RESOURCE_EXHAUSTED" in exc_msg or "quota" in exc_msg.lower():
-            bluesmind_key = os.getenv("BLUESMIND")
-            if bluesmind_key:
-                logger.warning("[Visual] Gemini quota exhausted. Falling back to Bluesmind vision...")
-                try:
-                    return await _extract_via_bluesmind(video_path, bluesmind_key)
-                except Exception as fallback_exc:
-                    logger.warning(f"[Visual] Lightning AI fallback also failed: {fallback_exc}")
+        await asyncio.to_thread(_safe_delete, client, gemini_file.name)
         raise RuntimeError(
-            f"[GeminiGenerationError] Content generation failed for '{video_path}': {exc}"
+            f"[GeminiGenerationError] Content generation failed: {exc}"
         ) from exc
 
 
 def delete_gemini_file(gemini_file_name: str) -> None:
-    """
-    Explicitly delete a file from Gemini's servers by its resource name.
-
-    Exposed as a public helper so callers can trigger cleanup even if
-    extract_visual_context raised before completing its own cleanup.
-
-    Args:
-        gemini_file_name: The `name` attribute of the Gemini file object
-                          (e.g., 'files/abc123').
-    """
     from google import genai
     api_key = os.getenv("GEMINI_API_KEY")
     if not api_key:
-        logger.warning("[Visual] Cannot delete Gemini file — GEMINI_API_KEY not set.")
         return
     client = genai.Client(api_key=api_key)
     _safe_delete(client, gemini_file_name)
 
 
-# ---------------------------------------------------------------------------
-# Internal helpers
-# ---------------------------------------------------------------------------
-
 def _safe_delete(client, gemini_file_name: str) -> None:
-    """
-    Attempt to delete a Gemini-hosted file, suppressing all errors.
-
-    Errors are logged as warnings — deletion failure must never crash the pipeline.
-
-    Args:
-        client:            An authenticated genai.Client instance.
-        gemini_file_name:  The resource name (e.g. 'files/abc123').
-    """
     try:
         client.files.delete(name=gemini_file_name)
         logger.info(f"[Visual] Deleted Gemini file: {gemini_file_name}")
@@ -221,79 +168,67 @@ def _safe_delete(client, gemini_file_name: str) -> None:
 # ---------------------------------------------------------------------------
 
 async def _extract_via_bluesmind(video_path: str, api_key: str) -> str:
-    """
-    Fallback visual extraction using Bluesmind's OpenAI-compatible endpoint.
-
-    Extracts a few key frames from the video via ffmpeg and sends them as
-    base64 images to the chat completions API (gpt-4o vision).
-
-    Args:
-        video_path: Absolute path to the local video file.
-        api_key:    BLUESMIND API key.
-
-    Returns:
-        A plain-text visual summary string.
-
-    Raises:
-        RuntimeError: If frame extraction or the API call fails.
-    """
-    frames = _extract_frames(video_path)
+    frames = await asyncio.to_thread(_extract_frames, video_path)
     if not frames:
         raise RuntimeError(
             f"[BluesmindFallbackError] No frames could be extracted from '{video_path}'"
         )
 
-    content_parts = [{"type": "text", "text": _VISUAL_PROMPT}]
-    for frame_path in frames:
-        with open(frame_path, "rb") as f:
-            b64 = base64.b64encode(f.read()).decode("utf-8")
-        content_parts.append({
-            "type": "image_url",
-            "image_url": {"url": f"data:image/jpeg;base64,{b64}"},
-        })
+    try:
+        content_parts = [{"type": "text", "text": _VISUAL_PROMPT}]
+        for frame_path in frames:
+            with open(frame_path, "rb") as f:
+                b64 = base64.b64encode(f.read()).decode("utf-8")
+            content_parts.append({
+                "type": "image_url",
+                "image_url": {"url": f"data:image/jpeg;base64,{b64}"},
+            })
 
-    payload = {
-        "model": "gpt-4o",
-        "messages": [{"role": "user", "content": content_parts}],
-        "max_tokens": 1024,
-    }
-    headers = {
-        "Authorization": f"Bearer {api_key}",
-        "Content-Type": "application/json",
-    }
+        payload = {
+            "model": "mimo-v2.5",
+            "messages": [{"role": "user", "content": content_parts}],
+            "max_tokens": 2048,
+        }
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        }
 
-    async with httpx.AsyncClient(timeout=120) as client:
-        resp = await client.post(
-            f"{_BLUESMIND_ENDPOINT}chat/completions",
-            headers=headers,
-            json=payload,
-        )
+        async with httpx.AsyncClient(timeout=120) as client:
+            resp = await client.post(
+                f"{_BLUESMIND_ENDPOINT}chat/completions",
+                headers=headers,
+                json=payload,
+            )
 
-    if resp.status_code != 200:
-        body = resp.text[:300]
-        raise RuntimeError(
-            f"[BluesmindFallbackError] API returned {resp.status_code}: {body}"
-        )
+        if resp.status_code != 200:
+            body = resp.text[:300]
+            raise RuntimeError(
+                f"[BluesmindFallbackError] API returned {resp.status_code}: {body}"
+            )
 
-    data = resp.json()
-    visual_summary = data["choices"][0]["message"]["content"].strip()
-    logger.info(f"[Visual] Bluesmind summary preview: {visual_summary[:200]}...")
+        data = resp.json()
+        choices = data.get("choices", [])
+        if not choices:
+            raise RuntimeError(
+                f"[BluesmindFallbackError] API returned empty choices. Response: {data}"
+            )
+        visual_summary = choices[0].get("message", {}).get("content", "").strip()
+        if not visual_summary:
+            raise RuntimeError(
+                f"[BluesmindFallbackError] API returned empty content. Response: {data}"
+            )
 
-    for f in frames:
-        _unlink_safe(f)
-
-    return visual_summary
+        logger.info(f"[Visual] Bluesmind summary preview: {visual_summary[:200]}...")
+        return visual_summary
+    finally:
+        for f in frames:
+            _unlink_safe(f)
 
 
 def _extract_frames(video_path: str) -> list[str]:
-    """
-    Extract *n* evenly-spaced JPEG frames from *video_path* using ffmpeg.
-
-    Returns a list of paths to the extracted frame images.
-    """
     import math
 
-    # Get video duration
     try:
         dur_result = subprocess.run(
             [
@@ -347,7 +282,6 @@ def _extract_frames(video_path: str) -> list[str]:
 
 
 def _unlink_safe(path: str) -> None:
-    """Remove a file, suppressing errors."""
     try:
         os.unlink(path)
     except Exception:

@@ -70,19 +70,21 @@ class TestDownloadVideo:
 
 
 class TestTranscribeAudio:
-    @patch("app.services.ingestion.os.getenv")
-    def test_missing_api_key(self, mock_getenv):
-        mock_getenv.return_value = None
+    @patch("app.services.groq_utils.get_keys")
+    @patch("app.services.ingestion._extract_audio")
+    def test_missing_api_key(self, mock_extract, mock_get_keys):
+        mock_get_keys.return_value = (None, None)
+        mock_extract.return_value = "/fake/audio.mp3"
         from app.services.ingestion import transcribe_audio
         import asyncio
-        with pytest.raises(RuntimeError, match="GROQ_API_KEY"):
+        with pytest.raises(RuntimeError, match="No GROQ_API_KEY or GROQ_API_KEY2"):
             asyncio.run(transcribe_audio("/fake/path.mp4"))
 
+    @patch("app.services.groq_utils.get_keys")
     @patch("app.services.ingestion._extract_audio")
-    @patch("app.services.ingestion.os.getenv")
     @patch("groq.Groq")
-    def test_transcription_success(self, mock_groq, mock_getenv, mock_extract, mock_video_path, tmp_path):
-        mock_getenv.return_value = "test-groq-key"
+    def test_transcription_success(self, mock_groq, mock_extract, mock_get_keys, mock_video_path, tmp_path):
+        mock_get_keys.return_value = ("test-groq-key", None)
         audio_path = tmp_path / "audio.mp3"
         audio_path.write_bytes(b"fake audio")
         mock_extract.return_value = str(audio_path)
@@ -95,11 +97,11 @@ class TestTranscribeAudio:
         result = asyncio.run(transcribe_audio(mock_video_path))
         assert result == "Hello world transcript"
 
+    @patch("app.services.groq_utils.get_keys")
     @patch("app.services.ingestion._extract_audio")
-    @patch("app.services.ingestion.os.getenv")
     @patch("groq.Groq")
-    def test_transcription_api_error(self, mock_groq, mock_getenv, mock_extract, mock_video_path, tmp_path):
-        mock_getenv.return_value = "test-groq-key"
+    def test_transcription_api_error(self, mock_groq, mock_extract, mock_get_keys, mock_video_path, tmp_path):
+        mock_get_keys.return_value = ("test-groq-key", None)
         audio_path = tmp_path / "audio.mp3"
         audio_path.write_bytes(b"fake audio")
         mock_extract.return_value = str(audio_path)
