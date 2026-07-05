@@ -175,6 +175,6 @@ Cognee Cloud is the backbone of SpillTheReel's memory layer:
 
 ## Future Enhancements
 
-- **Import Old Saved Reels** — A one-click tool to re-ingest all previously saved reels (from before the Cognee Cloud migration) into the new memory system. Scans Neo4j for orphaned metadata and re-runs them through the pipeline so every reel is searchable via Cognee Cloud.
+- **Import Instagram Saved Reels** — Import all your Instagram saved reels into SpillTheReel in one click. No need to share URLs one by one — bulk import your entire Instagram saved collection and make it all searchable instantly.
 
 
