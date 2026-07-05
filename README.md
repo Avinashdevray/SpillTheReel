@@ -34,7 +34,11 @@
 
 **Step 4:** Ask natural-language questions about your saved reels
 
-<img src="installguide.gif" alt="Install guide - how to install SpillTheReel PWA" width="360"/>
+<p align="center">
+  <img src="installguide.gif" alt="Install guide - how to install SpillTheReel PWA" width="360"/>
+  &nbsp;&nbsp;
+  <img src="use.gif" alt="Using SpillTheReel - search and chat" width="360"/>
+</p>
 
 ---
 
