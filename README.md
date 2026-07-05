@@ -34,7 +34,7 @@
 
 **Step 4:** Ask natural-language questions about your saved reels
 
-> 🎥 **[Watch the install guide](installguide.mp4)** — see how to install the PWA and start using SpillTheReel in under 30 seconds.
+<video src="installguide.mp4" controls autoplay loop muted width="100%" style="max-width: 720px; border-radius: 12px;"></video>
 
 ---
 
