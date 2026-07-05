@@ -26,6 +26,10 @@
 
 ## Getting Started
 
+<table>
+<tr>
+<td valign="top" width="50%">
+
 **Step 1:** Go to [spillthereel-caa31.web.app](https://spillthereel-caa31.web.app)
 
 **Step 2:** Tap "Add to Home Screen" to install as a PWA (works like a native app)
@@ -34,9 +38,12 @@
 
 **Step 4:** Ask natural-language questions about your saved reels
 
-<p align="center">
-  <img src="installguide.gif" alt="Install guide - how to install SpillTheReel PWA" width="360"/>
-</p>
+</td>
+<td valign="top" width="50%" align="center">
+  <img src="installguide.gif" alt="Install guide - how to install SpillTheReel PWA" width="300"/>
+</td>
+</tr>
+</table>
 
 ---
 
