@@ -58,6 +58,28 @@
 </tr>
 </table>
 
+> **Note:** The backend is not yet deployed to a public server. To use SpillTheReel, you'll need to run it locally.
+
+### Local Setup
+
+**Backend (FastAPI):**
+
+```bash
+cd backend
+python3 -m venv venv && source venv/bin/activate
+pip install -r requirements.txt
+# Add your API keys to app/.env (see .env.example)
+uvicorn app.main:app --host 0.0.0.0 --port 8000
+```
+
+**Frontend (Expo web):**
+
+```bash
+cd frontend
+npm install
+npx expo start --web
+```
+
 ---
 
 ## Screenshots
