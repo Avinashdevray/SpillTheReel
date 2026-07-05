@@ -72,15 +72,15 @@
 ## Features
 
 - **🧠 AI-Powered Ingestion** — Downloads the reel, transcribes audio (Groq Whisper), extracts visual context (Gemini + Bluesmind), and generates a unified multimodal summary (Groq Llama 3.3)
-- 
+  
 - **🔍 Semantic Search** — Powered by **Cognee Cloud**, which handles vector embeddings, knowledge graph construction, and entity extraction automatically. Your reels become searchable by meaning, not just keywords
-- 
+  
 - **📱 Installable PWA** — Works offline-capable, share sheet integration from Instagram, feels like a native app
-- 
+  
 - **🔒 User Isolation** — Every user's data is scoped to their own Cognee dataset (`reel_knowledge_{uid}`). You only see your own reels
-- 
+ 
 - **📊 Graph Storage** — Neo4j AuraDB stores reel metadata with full-text search fallback
-- 
+  
 - **⚡ Real-time Progress** — Polling-based job status so you always know where your reel is in the pipeline
 
 ---
