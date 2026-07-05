@@ -34,7 +34,7 @@
 
 **Step 4:** Ask natural-language questions about your saved reels
 
-<video src="installguide.mp4" controls autoplay loop muted playsinline width="100%" style="max-width: 720px; border-radius: 12px;"></video>
+<img src="installguide.gif" alt="Install guide - how to install SpillTheReel PWA" width="360"/>
 
 ---
 
