@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useRef } from 'react';
+import React, { useEffect, useState, useRef, useCallback } from 'react';
 import {
   StyleSheet,
   Text,
@@ -14,7 +14,8 @@ import {
   Alert,
   useWindowDimensions,
   Image,
-  Linking
+  Linking,
+  SafeAreaView
 } from 'react-native';
 import { auth } from './firebaseConfig';
 import {
@@ -34,16 +35,26 @@ import {
   X, 
   Eye, 
   EyeOff, 
-  AlertCircle,
-  PlayCircle,
+  CircleAlert,
+  CirclePlay,
   ExternalLink
 } from 'lucide-react-native';
 
-const BACKEND_URL = "https://prickly-subturriculated-donella.ngrok-free.dev";
+const BACKEND_URL = Platform.OS === 'web'
+  ? (() => {
+      const hostname = typeof window !== 'undefined' ? window.location.hostname : '';
+      return hostname === 'localhost' || hostname === '127.0.0.1'
+        ? 'http://localhost:8000'
+        : 'https://trans-dash-waves-cameras.trycloudflare.com';
+    })()
+  : (() => {
+      const c = require('expo-constants').default;
+      const m = typeof c.manifest === 'string' ? JSON.parse(c.manifest) : c.manifest;
+      return c.expoConfig?.extra?.backendUrl || m?.extra?.backendUrl || 'http://localhost:8000';
+    })();
 
-// Ultra Premium Linear / Monochrome Tokens
 const theme = {
-  bg: 'transparent',
+  bg: '#000000',
   surface: '#0A0A0A',
   surfaceHover: '#111111',
   primary: '#FFFFFF',
@@ -58,8 +69,6 @@ const theme = {
   success: '#32D74B',
   radius: 16,
 };
-
-// --- Custom Components ---
 
 const Card = ({ children, style }) => (
   <View style={[styles.card, style]}>
@@ -116,13 +125,69 @@ const ReelCard = ({ reel }) => (
   </View>
 );
 
-// --- Main App ---
+function swPostToken(token) {
+  if (navigator.serviceWorker?.controller) {
+    navigator.serviceWorker.controller.postMessage({ type: 'AUTH_TOKEN', token });
+  }
+}
+
+function swPostLogout() {
+  if (navigator.serviceWorker?.controller) {
+    navigator.serviceWorker.controller.postMessage({ type: 'AUTH_LOGOUT' });
+  }
+}
+
+let authTokenCache = null;
+let authTokenExpiry = 0;
+
+async function getAuthHeaders() {
+  try {
+    const user = auth.currentUser;
+    if (!user) return {};
+    if (authTokenCache && Date.now() < authTokenExpiry) {
+      return {
+        'Authorization': `Bearer ${authTokenCache}`,
+        'Content-Type': 'application/json',
+      };
+    }
+    const token = await user.getIdToken();
+    authTokenCache = token;
+    authTokenExpiry = Date.now() + 50 * 60 * 1000;
+    swPostToken(token);
+    return {
+      'Authorization': `Bearer ${token}`,
+      'Content-Type': 'application/json',
+    };
+  } catch {
+    return {};
+  }
+}
+
+async function fetchWithRefresh(url, options = {}) {
+  const headers = await getAuthHeaders();
+  const res = await fetch(url, { ...options, headers: { ...headers, ...options.headers } });
+  if (res.status === 401) {
+    authTokenCache = null;
+    authTokenExpiry = 0;
+    try {
+      const user = auth.currentUser;
+      if (user) {
+        const token = await user.getIdToken(true);
+        authTokenCache = token;
+        authTokenExpiry = Date.now() + 50 * 60 * 1000;
+        swPostToken(token);
+        const refreshedHeaders = await getAuthHeaders();
+        return fetch(url, { ...options, headers: { ...refreshedHeaders, ...options.headers } });
+      }
+    } catch {}
+  }
+  return res;
+}
 
 export default function App() {
   const { width } = useWindowDimensions();
   const isMobile = width < 768;
 
-  // Authentication states
   const [user, setUser] = useState(null);
   const [authEmail, setAuthEmail] = useState('');
   const [authPassword, setAuthPassword] = useState('');
@@ -131,26 +196,76 @@ export default function App() {
   const [authError, setAuthError] = useState('');
   const [showPassword, setShowPassword] = useState(false);
 
-  // Main App states
   const [query, setQuery] = useState('');
   const [chatHistory, setChatHistory] = useState([]);
   const [isLoading, setIsLoading] = useState(false);
   const [ingesting, setIngesting] = useState(false);
+  const [ingestStatus, setIngestStatus] = useState('');
   const [reelUrl, setReelUrl] = useState('');
   const [showUrlInput, setShowUrlInput] = useState(false);
   const scrollViewRef = useRef(null);
   const fadeAnim = useRef(new Animated.Value(0)).current;
+  const pollRef = useRef(null);
+  const isMountedRef = useRef(true);
 
-  // Listen for Firebase Auth state changes
+  const stopPolling = useCallback(() => {
+    if (pollRef.current) {
+      clearInterval(pollRef.current);
+      pollRef.current = null;
+    }
+    setIngesting(false);
+    setIngestStatus('');
+  }, []);
+
+  const startPolling = useCallback((jobId) => {
+    setIngesting(true);
+    setIngestStatus('Pipeline queued...');
+    pollRef.current = setInterval(async () => {
+      if (!isMountedRef.current) {
+        stopPolling();
+        return;
+      }
+      try {
+        const res = await fetchWithRefresh(`${BACKEND_URL}/status/${jobId}`);
+        if (!res.ok) {
+          stopPolling();
+          return;
+        }
+        const data = await res.json();
+        if (isMountedRef.current) {
+          setIngestStatus(data.message || data.status);
+          if (data.status === 'completed' || data.status === 'failed') {
+            stopPolling();
+            setChatHistory((prev) => [
+              ...prev,
+              {
+                type: data.status === 'completed' ? 'system' : 'error',
+                text: data.message,
+              },
+            ]);
+          }
+        }
+      } catch {
+        if (isMountedRef.current) stopPolling();
+      }
+    }, 2000);
+  }, [stopPolling]);
+
   useEffect(() => {
-    const unsubscribe = onAuthStateChanged(auth, (currentUser) => {
+    isMountedRef.current = true;
+    return () => {
+      isMountedRef.current = false;
+      stopPolling();
+    };
+  }, [stopPolling]);
+
+  useEffect(() => {
+    const unsubscribe = onAuthStateChanged(auth, async (currentUser) => {
       setUser(currentUser);
       if (currentUser) {
+        swPostToken(await currentUser.getIdToken());
         setChatHistory([
-          {
-            type: 'system',
-            text: `Welcome to SpillTheReel, ${currentUser.email}.`,
-          },
+          { type: 'system', text: `Welcome to SpillTheReel, ${currentUser.email}.` },
         ]);
         Animated.timing(fadeAnim, {
           toValue: 1,
@@ -158,26 +273,34 @@ export default function App() {
           useNativeDriver: true,
         }).start();
       } else {
+        swPostLogout();
         setChatHistory([]);
+        setShowUrlInput(false);
+        setReelUrl('');
+        setQuery('');
         fadeAnim.setValue(0);
       }
     });
     return unsubscribe;
   }, []);
 
-  // Handle incoming shares from Web Share Target API (PWA)
   useEffect(() => {
     if (Platform.OS === 'web' && window.location.search) {
       const params = new URLSearchParams(window.location.search);
       const sharedUrl = params.get('url');
       const sharedText = params.get('text');
-      
-      // Instagram often sends the URL in the "text" field when sharing via Android/iOS intents
+      const jobId = params.get('job_id');
+
+      if (jobId) {
+        window.history.replaceState({}, document.title, window.location.pathname);
+        startPolling(jobId);
+        return;
+      }
+
       let extractedUrl = '';
       if (sharedUrl && sharedUrl.startsWith('http')) {
         extractedUrl = sharedUrl;
       } else if (sharedText) {
-        // Find a URL in the text payload
         const urlMatch = sharedText.match(/https?:\/\/[^\s]+/);
         if (urlMatch) {
           extractedUrl = urlMatch[0];
@@ -185,13 +308,45 @@ export default function App() {
       }
 
       if (extractedUrl) {
-        setReelUrl(extractedUrl);
-        setShowUrlInput(true);
-        // Clear the URL parameters so it doesn't trigger again on reload
         window.history.replaceState({}, document.title, window.location.pathname);
+        const authUnsub = onAuthStateChanged(auth, async (user) => {
+          authUnsub();
+          if (user) {
+            try {
+              const res = await fetchWithRefresh(`${BACKEND_URL}/ingest`, {
+                method: 'POST',
+                body: JSON.stringify({ url: extractedUrl }),
+              });
+              if (res.ok) {
+                const d = await res.json();
+                if (d.job_id) startPolling(d.job_id);
+                if (Platform.OS === 'web' && window.top) window.close();
+                return;
+              }
+            } catch {}
+            setReelUrl(extractedUrl);
+            setShowUrlInput(true);
+          } else {
+            setReelUrl(extractedUrl);
+            setShowUrlInput(true);
+          }
+        });
       }
     }
-  }, []);
+
+    const handlePopState = () => {
+      if (window.location.search) {
+        const params = new URLSearchParams(window.location.search);
+        const sharedUrl = params.get('url');
+        const jobId = params.get('job_id');
+        if (sharedUrl || jobId) {
+          window.location.reload();
+        }
+      }
+    };
+    window.addEventListener('popstate', handlePopState);
+    return () => window.removeEventListener('popstate', handlePopState);
+  }, [startPolling]);
 
   const handleAuth = async () => {
     if (!authEmail.trim() || !authPassword.trim()) {
@@ -207,22 +362,19 @@ export default function App() {
         await signInWithEmailAndPassword(auth, authEmail.trim(), authPassword.trim());
       }
     } catch (e) {
-      let errorMsg = e.message;
-      if (e.code === 'auth/operation-not-allowed') {
-        errorMsg = 'Email/Password sign-in is not enabled. Please enable it in Firebase Console → Authentication → Sign-in method.';
-      } else if (e.code === 'auth/invalid-email') {
-        errorMsg = 'Invalid email address.';
-      } else if (e.code === 'auth/wrong-password' || e.code === 'auth/invalid-credential') {
-        errorMsg = 'Incorrect email or password.';
-      } else if (e.code === 'auth/user-not-found') {
-        errorMsg = 'No account found with this email. Try signing up.';
-      } else if (e.code === 'auth/email-already-in-use') {
-        errorMsg = 'An account with this email already exists. Try signing in.';
-      } else if (e.code === 'auth/weak-password') {
-        errorMsg = 'Password should be at least 6 characters.';
-      } else {
-        errorMsg = `Authentication Error: ${e.code || e.message}`;
-      }
+      let errorMsg = e.code === 'auth/operation-not-allowed'
+        ? 'Email/Password sign-in is not enabled. Please enable it in Firebase Console.'
+        : e.code === 'auth/invalid-email'
+          ? 'Invalid email address.'
+          : e.code === 'auth/wrong-password' || e.code === 'auth/invalid-credential'
+            ? 'Incorrect email or password.'
+            : e.code === 'auth/user-not-found'
+              ? 'No account found with this email. Try signing up.'
+              : e.code === 'auth/email-already-in-use'
+                ? 'An account with this email already exists. Try signing in.'
+                : e.code === 'auth/weak-password'
+                  ? 'Password should be at least 6 characters.'
+                  : `Authentication Error: ${e.code || e.message}`;
       setAuthError(errorMsg);
     } finally {
       setAuthLoading(false);
@@ -234,27 +386,21 @@ export default function App() {
       setAuthError('Google Sign-In is only supported on the web version.');
       return;
     }
-    
     setAuthLoading(true);
     setAuthError('');
     const provider = new GoogleAuthProvider();
-    
     try {
       await signInWithPopup(auth, provider);
     } catch (e) {
-      console.error("Google Auth Error:", e);
-      let errorMsg = e.message;
-      
-      if (e.code === 'auth/popup-blocked') {
-        errorMsg = 'Popup blocked by browser. Please allow popups for this site.';
-      } else if (e.code === 'auth/popup-closed-by-user') {
-        errorMsg = 'Google sign-in was cancelled.';
-      } else if (e.code === 'auth/unauthorized-domain') {
-        errorMsg = 'This domain is not authorized for Google Sign-In. Add it in Firebase Console -> Authentication -> Settings -> Authorized domains.';
-      } else if (e.code === 'auth/operation-not-allowed' || e.code === 'auth/configuration-not-found') {
-        errorMsg = 'Google sign-in is not enabled. Go to Firebase Console -> Authentication -> Sign-in method -> Enable Google, and ensure you have a support email configured in project settings.';
-      }
-      
+      let errorMsg = e.code === 'auth/popup-blocked'
+        ? 'Popup blocked. Please allow popups for this site.'
+        : e.code === 'auth/popup-closed-by-user'
+          ? 'Google sign-in was cancelled.'
+          : e.code === 'auth/unauthorized-domain'
+            ? 'This domain is not authorized. Add it in Firebase Console.'
+            : e.code === 'auth/operation-not-allowed' || e.code === 'auth/configuration-not-found'
+              ? 'Google sign-in is not enabled. Enable it in Firebase Console.'
+              : `Google Auth Error: ${e.code || e.message}`;
       setAuthError(errorMsg);
     } finally {
       setAuthLoading(false);
@@ -262,6 +408,7 @@ export default function App() {
   };
 
   const handleSignOut = async () => {
+    stopPolling();
     try {
       await signOut(auth);
     } catch (e) {
@@ -271,40 +418,40 @@ export default function App() {
 
   const sendToBackend = async (url) => {
     setIngesting(true);
+    setIngestStatus('Sending to server...');
     try {
-      const token = await auth.currentUser?.getIdToken();
-      const res = await fetch(`${BACKEND_URL}/ingest`, {
+      const res = await fetchWithRefresh(`${BACKEND_URL}/ingest`, {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${token}`,
-          'ngrok-skip-browser-warning': 'true',
-        },
         body: JSON.stringify({ url }),
       });
+      const data = await res.json();
       if (res.ok) {
-        const data = await res.json();
         setChatHistory((prev) => [
           ...prev,
-          {
-            type: 'system',
-            text: data.message || `Reel processing started: ${url.substring(0, 50)}...`,
-          },
+          { type: 'system', text: data.message || 'Reel processing started.' },
         ]);
+        if (data.job_id) {
+          startPolling(data.job_id);
+        }
+      } else if (res.status === 401) {
+        setChatHistory((prev) => [
+          ...prev,
+          { type: 'error', text: 'Session expired. Please log out and log in again.' },
+        ]);
+        stopPolling();
       } else {
-        const errorData = await res.json().catch(() => ({ detail: 'Failed to send reel' }));
         setChatHistory((prev) => [
           ...prev,
-          { type: 'error', text: `Ingest failed: ${errorData.detail || 'Check server logs.'}` },
+          { type: 'error', text: `Ingest failed: ${data?.detail || 'Unknown error'}` },
         ]);
+        stopPolling();
       }
     } catch (e) {
       setChatHistory((prev) => [
         ...prev,
         { type: 'error', text: 'Connection refused. Is the backend server running?' },
       ]);
-    } finally {
-      setIngesting(false);
+      stopPolling();
     }
   };
 
@@ -316,27 +463,23 @@ export default function App() {
     setIsLoading(true);
 
     try {
-      const token = await auth.currentUser?.getIdToken();
-      const res = await fetch(
+      const res = await fetchWithRefresh(
         `${BACKEND_URL}/chat?q=${encodeURIComponent(userQuery)}`,
-        {
-          headers: {
-            'Authorization': `Bearer ${token}`,
-            'ngrok-skip-browser-warning': 'true',
-          },
-        }
       );
       if (!res.ok) {
-        if (res.status === 401) {
-          setChatHistory((prev) => [...prev, { type: 'error', text: 'Session expired or unauthorized. Please re-login.' }]);
-          return;
+        if (res.status === 429) {
+          setChatHistory((prev) => [...prev, { type: 'error', text: 'Rate limit exceeded. Please wait.' }]);
+        } else if (res.status === 401) {
+          setChatHistory((prev) => [...prev, { type: 'error', text: 'Session expired. Please re-login.' }]);
+        } else {
+          setChatHistory((prev) => [...prev, { type: 'error', text: 'API error. Please try again.' }]);
         }
-        throw new Error('API Error');
+        return;
       }
       const data = await res.json();
       const responseData = data.response;
 
-      if (typeof responseData === 'object' && responseData !== null && responseData.text) {
+      if (typeof responseData === 'object' && responseData?.text) {
         setChatHistory((prev) => [
           ...prev, 
           { type: 'ai', text: responseData.text, reels: responseData.reels || [] }
@@ -350,17 +493,16 @@ export default function App() {
     } catch (e) {
       setChatHistory((prev) => [
         ...prev,
-        { type: 'error', text: 'Could not reach backend.' },
+        { type: 'error', text: `Could not reach backend: ${e?.message || e}` },
       ]);
     } finally {
       setIsLoading(false);
     }
   };
 
-  // --- Render Auth Screen ---
   if (!user) {
     return (
-      <View style={styles.container}>
+      <SafeAreaView style={styles.container}>
         <StatusBar barStyle="light-content" />
         <KeyboardAvoidingView
           behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
@@ -419,7 +561,7 @@ export default function App() {
 
               {authError ? (
                 <View style={styles.errorBanner}>
-                  <AlertCircle size={16} color={theme.error} />
+                  <CircleAlert size={16} color={theme.error} />
                   <Text style={styles.errorText}>{authError}</Text>
                 </View>
               ) : null}
@@ -458,16 +600,14 @@ export default function App() {
             </View>
           </Card>
         </KeyboardAvoidingView>
-      </View>
+      </SafeAreaView>
     );
   }
 
-  // --- Render Authenticated Dashboard ---
   return (
-    <View style={styles.container}>
+    <SafeAreaView style={styles.container}>
       <StatusBar barStyle="light-content" />
 
-      {/* Header */}
       <Animated.View style={[styles.header, { opacity: fadeAnim }]}>
         <View style={[styles.headerContent, isMobile && { paddingHorizontal: 16 }]}>
           <View style={styles.headerLeft}>
@@ -495,150 +635,151 @@ export default function App() {
         </View>
       </Animated.View>
 
-      <View style={[styles.mainLayout, !isMobile && styles.mainLayoutDesktop]}>
-        {/* Manual URL input overlay */}
-        {showUrlInput && (
-          <View style={[styles.urlInputArea, isMobile && { paddingHorizontal: 16 }]}>
-            <View style={styles.urlInputWrapper}>
-              <Film size={18} color={theme.textMuted} style={styles.urlIcon} />
+      <KeyboardAvoidingView
+        behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+        style={styles.mainLayout}
+        keyboardVerticalOffset={Platform.OS === 'ios' ? 90 : 0}
+      >
+        <View style={[styles.mainLayout, !isMobile && styles.mainLayoutDesktop]}>
+          {showUrlInput && (
+            <View style={[styles.urlInputArea, isMobile && { paddingHorizontal: 16 }]}>
+              <View style={styles.urlInputWrapper}>
+                <Film size={18} color={theme.textMuted} style={styles.urlIcon} />
+                <TextInput
+                  style={styles.urlInput}
+                  value={reelUrl}
+                  onChangeText={setReelUrl}
+                  placeholder="Paste Instagram Reel URL..."
+                  placeholderTextColor={theme.textMuted}
+                  autoCapitalize="none"
+                  autoCorrect={false}
+                />
+                <TouchableOpacity
+                  style={[styles.urlSubmitBtn, !reelUrl.trim() && styles.btnDisabled]}
+                  onPress={() => {
+                    if (reelUrl.trim()) {
+                      sendToBackend(reelUrl.trim());
+                      setReelUrl('');
+                      setShowUrlInput(false);
+                    }
+                  }}
+                  disabled={!reelUrl.trim()}
+                >
+                  <Send size={14} color={theme.primaryText} />
+                </TouchableOpacity>
+              </View>
+            </View>
+          )}
+
+          {ingesting && (
+            <View style={styles.ingestBanner}>
+              <ActivityIndicator size="small" color={theme.textMuted} />
+              <Text style={styles.ingestText}>{ingestStatus || 'Extracting intelligence...'}</Text>
+            </View>
+          )}
+
+          <ScrollView
+            ref={scrollViewRef}
+            style={styles.chat}
+            contentContainerStyle={[styles.chatContent, isMobile && { paddingHorizontal: 16, paddingVertical: 16 }, { paddingBottom: 100 }]}
+            onContentSizeChange={() =>
+              scrollViewRef.current?.scrollToEnd({ animated: true })
+            }
+            keyboardShouldPersistTaps="handled"
+          >
+            {chatHistory.length === 0 && !isLoading && (
+              <View style={styles.emptyState}>
+                <View style={styles.emptyIconCircle}>
+                  <MessageSquare size={28} color={theme.textMuted} strokeWidth={1.5} />
+                </View>
+                <Text style={styles.emptyTitle}>Empty Workspace</Text>
+                <Text style={styles.emptyDesc}>
+                  Provide a Reel URL to begin indexing. Once indexed, you can query its contents via natural language.
+                </Text>
+              </View>
+            )}
+
+            {chatHistory.map((msg, i) => {
+              const isUser = msg.type === 'user';
+              const isSystem = msg.type === 'system';
+              const isError = msg.type === 'error';
+
+              if (isSystem || isError) {
+                return (
+                  <View key={i} style={[styles.systemMsg, isError && styles.errorSystemMsg]}>
+                    {isError ? <CircleAlert size={14} color={theme.error} /> : <Film size={14} color={theme.textMuted} />}
+                    <Text style={[styles.systemText, isError && styles.errorSystemText]}>{msg.text}</Text>
+                  </View>
+                );
+              }
+
+              return (
+                <View key={i} style={[styles.msgRow, isUser ? styles.userRow : styles.aiRow]}>
+                  {!isUser && (
+                    <View style={styles.avatarAi}>
+                      <CirclePlay size={14} color={theme.textMuted} />
+                    </View>
+                  )}
+                  <View style={styles.msgContentWrapper}>
+                    <View style={[styles.msgBubble, isUser ? styles.userBubble : styles.aiBubble]}>
+                      <Text style={[styles.msgText, isUser && styles.userMsgText]}>{msg.text}</Text>
+                    </View>
+                    {!isUser && msg.reels && msg.reels.length > 0 && (
+                      <ScrollView 
+                        horizontal 
+                        showsHorizontalScrollIndicator={false} 
+                        style={styles.reelsScroller}
+                        contentContainerStyle={styles.reelsScrollerContent}
+                      >
+                        {msg.reels.map((reel, rIdx) => (
+                          <ReelCard key={rIdx} reel={reel} />
+                        ))}
+                      </ScrollView>
+                    )}
+                  </View>
+                </View>
+              );
+            })}
+
+            {isLoading && (
+              <View style={[styles.msgRow, styles.aiRow]}>
+                <View style={styles.avatarAi}>
+                  <CirclePlay size={14} color={theme.textMuted} />
+                </View>
+                <View style={[styles.msgBubble, styles.aiBubble, styles.typingBubble]}>
+                  <ActivityIndicator size="small" color={theme.textMuted} />
+                  <Text style={styles.thinkingText}>Thinking...</Text>
+                </View>
+              </View>
+            )}
+          </ScrollView>
+
+          <View style={[styles.inputFloating, isMobile && { paddingHorizontal: 12 }]}>
+            <View style={styles.inputArea}>
               <TextInput
-                style={styles.urlInput}
-                value={reelUrl}
-                onChangeText={setReelUrl}
-                placeholder="Paste Instagram Reel URL..."
+                style={styles.input}
+                value={query}
+                onChangeText={setQuery}
+                placeholder="Ask anything..."
                 placeholderTextColor={theme.textMuted}
-                autoCapitalize="none"
-                autoCorrect={false}
+                onSubmitEditing={askMemory}
+                returnKeyType="send"
+                editable={!isLoading}
               />
               <TouchableOpacity
-                style={[styles.urlSubmitBtn, !reelUrl.trim() && styles.btnDisabled]}
-                onPress={() => {
-                  if (reelUrl.trim()) {
-                    sendToBackend(reelUrl.trim());
-                    setReelUrl('');
-                    setShowUrlInput(false);
-                  }
-                }}
-                disabled={!reelUrl.trim()}
+                style={[styles.sendBtn, (!query.trim() || isLoading) && styles.btnDisabled]}
+                onPress={askMemory}
+                disabled={!query.trim() || isLoading}
               >
-                <Send size={14} color={theme.primaryText} />
+                <Send size={16} color={theme.primaryText} />
               </TouchableOpacity>
             </View>
           </View>
-        )}
-
-        {/* Chat input moved to bottom */}        {/* Ingesting indicator */}
-        {ingesting && (
-          <View style={styles.ingestBanner}>
-            <ActivityIndicator size="small" color={theme.textMuted} />
-            <Text style={styles.ingestText}>Extracting intelligence...</Text>
-          </View>
-        )}
-
-        {/* Chat area */}
-        <ScrollView
-          ref={scrollViewRef}
-          style={styles.chat}
-          contentContainerStyle={[styles.chatContent, isMobile && { paddingHorizontal: 16, paddingVertical: 16 }, { paddingBottom: 100 }]}
-          onContentSizeChange={() =>
-            scrollViewRef.current?.scrollToEnd({ animated: true })
-          }
-        >
-          {chatHistory.length === 0 && (
-            <View style={styles.emptyState}>
-              <View style={styles.emptyIconCircle}>
-                <MessageSquare size={28} color={theme.textMuted} strokeWidth={1.5} />
-              </View>
-              <Text style={styles.emptyTitle}>Empty Workspace</Text>
-              <Text style={styles.emptyDesc}>
-                Provide a Reel URL to begin indexing. Once indexed, you can query its contents via natural language.
-              </Text>
-            </View>
-          )}
-
-          {chatHistory.map((msg, i) => {
-            const isUser = msg.type === 'user';
-            const isSystem = msg.type === 'system';
-            const isError = msg.type === 'error';
-            
-            if (isSystem || isError) {
-              return (
-                <View key={i} style={[styles.systemMsg, isError && styles.errorSystemMsg]}>
-                  {isError ? <AlertCircle size={14} color={theme.error} /> : <Film size={14} color={theme.textMuted} />}
-                  <Text style={[styles.systemText, isError && styles.errorSystemText]}>{msg.text}</Text>
-                </View>
-              );
-            }
-
-            return (
-              <View key={i} style={[styles.msgRow, isUser ? styles.userRow : styles.aiRow]}>
-                {!isUser && (
-                  <View style={styles.avatarAi}>
-                    <PlayCircle size={14} color={theme.textMuted} />
-                  </View>
-                )}
-                <View style={styles.msgContentWrapper}>
-                  <View style={[styles.msgBubble, isUser ? styles.userBubble : styles.aiBubble]}>
-                    <Text style={[styles.msgText, isUser && styles.userMsgText]}>{msg.text}</Text>
-                  </View>
-                  {!isUser && msg.reels && msg.reels.length > 0 && (
-                    <ScrollView 
-                      horizontal 
-                      showsHorizontalScrollIndicator={false} 
-                      style={styles.reelsScroller}
-                      contentContainerStyle={styles.reelsScrollerContent}
-                    >
-                      {msg.reels.map((reel, rIdx) => (
-                        <ReelCard key={rIdx} reel={reel} />
-                      ))}
-                    </ScrollView>
-                  )}
-                </View>
-              </View>
-            );
-          })}
-
-          {isLoading && (
-            <View style={[styles.msgRow, styles.aiRow]}>
-              <View style={styles.avatarAi}>
-                <PlayCircle size={14} color={theme.textMuted} />
-              </View>
-              <View style={[styles.msgBubble, styles.aiBubble, styles.typingBubble]}>
-                <ActivityIndicator size="small" color={theme.textMuted} />
-                <Text style={styles.thinkingText}>Thinking...</Text>
-              </View>
-            </View>
-          )}
-        </ScrollView>
-
-        {/* Floating input pinned to bottom */}
-        <View style={[styles.inputFloating, isMobile && { paddingHorizontal: 12 }]}>
-          <View style={styles.inputArea}>
-            <TextInput
-              style={styles.input}
-              value={query}
-              onChangeText={setQuery}
-              placeholder="Ask anything..."
-              placeholderTextColor={theme.textMuted}
-              onSubmitEditing={askMemory}
-              returnKeyType="send"
-              editable={!isLoading}
-            />
-            <TouchableOpacity
-              style={[styles.sendBtn, (!query.trim() || isLoading) && styles.btnDisabled]}
-              onPress={askMemory}
-              disabled={!query.trim() || isLoading}
-            >
-              <Send size={16} color={theme.primaryText} />
-            </TouchableOpacity>
-          </View>
         </View>
-      </View>
-    </View>
+      </KeyboardAvoidingView>
+    </SafeAreaView>
   );
 }
-
-// --- Styles (Linear/Vercel Aesthetic) ---
 
 const styles = StyleSheet.create({
   container: {
@@ -646,7 +787,6 @@ const styles = StyleSheet.create({
     backgroundColor: theme.bg,
   },
   
-  // Auth Screen
   authWrapper: {
     flex: 1,
     justifyContent: 'center',
@@ -798,12 +938,10 @@ const styles = StyleSheet.create({
     fontSize: 13,
   },
 
-  // Main App
   header: {
     backgroundColor: theme.bg,
     borderBottomWidth: 1,
     borderBottomColor: theme.border,
-    paddingTop: Platform.OS === 'ios' ? 50 : 0,
     zIndex: 10,
   },
   headerContent: {
@@ -1041,7 +1179,6 @@ const styles = StyleSheet.create({
     fontSize: 13,
   },
   
-  // Reel Cards
   reelsScroller: {
     marginTop: 12,
   },

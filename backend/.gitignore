@@ -11,10 +11,30 @@ __pycache__/
 .env
 cookies.txt
 
+# Project documentation (regenerated from code)
+context.md
+CONTEXT.md
+
+# Dummy credentials — NEVER commit real ones
+dummy-service-account.json
+dummy_key.pem
+
+# Logs
+*.log
+ngrok.log
+firebase-debug.log
+
 # LanceDB + Cognee local data stores
 .lancedb/
 lancedb/
 .cognee_data/
+
+# Ad-hoc debug scripts
+test_cognee.py
+test_fb.py
+test_neo4j.py
+CRASH_REPORT.md
+diagnostic_report.md
 
 # IDE
 .vscode/

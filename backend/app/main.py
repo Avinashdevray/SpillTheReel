@@ -19,11 +19,11 @@ from dotenv import load_dotenv
 # Load .env FIRST — must happen before any os.getenv() calls
 load_dotenv()
 
-# Prevent Cognee from enforcing multi-user access control (causes conflicts)
+# Cognee v1.2+ environment configuration (must be set BEFORE imports)
 os.environ.setdefault("ENABLE_BACKEND_ACCESS_CONTROL", "false")
-
-# Bypass Cognee's LLM connection test — it tests OpenAI's endpoint, not our Groq one.
+os.environ.setdefault("CACHING", "false")
 os.environ.setdefault("COGNEE_SKIP_CONNECTION_TEST", "true")
+os.environ.setdefault("SYSTEM_ROOT_DIRECTORY", os.path.join(os.getcwd(), ".cognee_data"))
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -50,7 +50,8 @@ def _setup_neo4j_constraints() -> None:
         constraints = [
             "CREATE CONSTRAINT user_uid_unique IF NOT EXISTS FOR (u:User) REQUIRE u.firebase_uid IS UNIQUE;",
             "CREATE CONSTRAINT reel_owner_url_unique IF NOT EXISTS FOR (r:Reel) REQUIRE (r.owner_uid, r.url) IS UNIQUE;",
-            "CREATE INDEX reel_owner_idx IF NOT EXISTS FOR (r:Reel) ON (r.owner_uid);"
+            "CREATE INDEX reel_owner_idx IF NOT EXISTS FOR (r:Reel) ON (r.owner_uid);",
+            "CREATE FULLTEXT INDEX reel_text IF NOT EXISTS FOR (r:Reel) ON EACH [r.summary, r.transcript];"
         ]
         logger.info("Setting up Neo4j constraints & indices...")
         with driver.session(database=db_name) as s:
@@ -63,6 +64,32 @@ def _setup_neo4j_constraints() -> None:
     except Exception as exc:
         logger.error(f"Failed to setup Neo4j constraints: {exc}")
 
+
+
+def _configure_cognee_llm() -> None:
+    """Configure only the LLM portion of Cognee (extracted so brain.py can restore it)."""
+    import cognee
+
+    from app.services.groq_utils import get_keys
+
+    groq_api_key, groq_api_key2 = get_keys()
+    bluesmind_key = os.getenv("BLUESMIND")
+
+    if bluesmind_key:
+        os.environ["OPENAI_API_KEY"] = bluesmind_key
+        os.environ["OPENAI_API_BASE"] = "https://api.bluesminds.com/v1/"
+        cognee.config.set_llm_provider("openai")
+        cognee.config.set_llm_endpoint("https://api.bluesminds.com/v1/")
+        cognee.config.set_llm_api_key(bluesmind_key)
+        cognee.config.set_llm_model("openai/glm-4.6")
+        logger.info("[Config] Cognee LLM → Bluesmind (glm-4.6) — entity extraction enabled")
+    else:
+        api_key = groq_api_key or groq_api_key2
+        cognee.config.set_llm_provider("openai")
+        cognee.config.set_llm_endpoint("https://api.groq.com/openai/v1")
+        cognee.config.set_llm_api_key(api_key)
+        cognee.config.set_llm_model("openai/llama-3.3-70b-versatile")
+        logger.info("[Config] Cognee LLM → Groq (llama-3.3-70b-versatile) — entity extraction skipped")
 
 
 def _configure_cognee() -> None:
@@ -83,7 +110,6 @@ def _configure_cognee() -> None:
         name
         for name, val in [
             ("GROQ_API_KEY", groq_api_key),
-            ("GEMINI_API_KEY", gemini_api_key),
             ("NEO4J_URI", neo4j_uri),
             ("NEO4J_USERNAME", neo4j_user),
             ("NEO4J_PASSWORD", neo4j_pass),
@@ -96,22 +122,8 @@ def _configure_cognee() -> None:
             "Check your backend/.env file."
         )
 
-    # LLM — prefer Bluesmind (supports function calling for entity extraction),
-    # fall back to Groq (transcription/summary only, no entity graph).
-    if bluesmind_key:
-        os.environ["OPENAI_API_KEY"] = bluesmind_key
-        os.environ["OPENAI_API_BASE"] = "https://api.bluesminds.com/v1/"
-        cognee.config.set_llm_provider("openai")
-        cognee.config.set_llm_endpoint("https://api.bluesminds.com/v1/")
-        cognee.config.set_llm_api_key(bluesmind_key)
-        cognee.config.set_llm_model("openai/gpt-4o")
-        logger.info("[Config] Cognee LLM → Bluesmind (gpt-4o) — entity extraction enabled")
-    else:
-        cognee.config.set_llm_provider("openai")
-        cognee.config.set_llm_endpoint("https://api.groq.com/openai/v1")
-        cognee.config.set_llm_api_key(groq_api_key)
-        cognee.config.set_llm_model("openai/llama-3.3-70b-versatile")
-        logger.info("[Config] Cognee LLM → Groq (llama-3.3-70b-versatile) — entity extraction skipped")
+    # LLM config (extracted for restore-from-backup)
+    _configure_cognee_llm()
 
     # Embeddings — local fastembed (no external API calls required)
     cognee.config.set_embedding_provider("fastembed")
@@ -119,22 +131,17 @@ def _configure_cognee() -> None:
     cognee.config.set_embedding_dimensions(384)
 
     # Graph DB — Neo4j AuraDB
+    neo4j_db_name = os.getenv("NEO4J_DATABASE", neo4j_user)
     cognee.config.set_graph_database_provider("neo4j")
     cognee.config.set_graph_db_config({
         "graph_database_url": neo4j_uri,
         "graph_database_username": neo4j_user,
         "graph_database_password": neo4j_pass,
-        "graph_database_name": neo4j_user,  # AuraDB uses username as db name
+        "graph_database_name": neo4j_db_name,
     })
 
     # Vector DB — local LanceDB
     cognee.config.set_vector_db_provider("lancedb")
-
-    # Redirect Cognee's system directory out of the venv site-packages into the
-    # project directory so that the knowledge graph survives pip upgrades and
-    # venv recreation.  This cascades to the relational, graph, and vector DB
-    # configs automatically.
-    cognee.config.system_root_directory(os.path.join(os.getcwd(), ".cognee_data"))
 
     logger.info("Cognee configuration applied successfully.")
 
@@ -144,9 +151,12 @@ async def lifespan(app: FastAPI):
     """Application lifespan handler — runs startup logic before serving requests."""
     logger.info("SpillTheReel backend starting up...")
     try:
-        from firebase_admin import credentials
-        cred = credentials.Certificate('dummy-service-account.json')
-        firebase_admin.initialize_app(cred, options={'projectId': 'spillthereel-caa31'})
+        sa_path = os.getenv("FIREBASE_SERVICE_ACCOUNT_PATH")
+        if sa_path:
+            cred = firebase_admin.credentials.Certificate(os.path.expanduser(sa_path))
+            firebase_admin.initialize_app(cred, options={'projectId': 'spillthereel-caa31'})
+        else:
+            firebase_admin.initialize_app(options={'projectId': 'spillthereel-caa31'})
         logger.info("Firebase Admin SDK initialized successfully.")
     except ValueError:
         logger.warning("Firebase Admin SDK was already initialized.")
@@ -159,6 +169,17 @@ async def lifespan(app: FastAPI):
     except Exception as exc:
         logger.critical(f"Startup failed during Cognee configuration: {exc}", exc_info=True)
         raise
+
+    # Cognee Cloud — connect if configured
+    cloud_url = os.getenv("COGNEE_CLOUD_URL")
+    cloud_key = os.getenv("COGNEE_CLOUD_API_KEY")
+    if cloud_url and cloud_key:
+        try:
+            import cognee
+            await cognee.serve(url=cloud_url, api_key=cloud_key)
+            logger.info(f"[Config] Cognee Cloud connected: {cloud_url}")
+        except Exception as exc:
+            logger.warning(f"[Config] Cognee Cloud connection failed (will use local): {exc}")
 
     # Run constraint creation
     _setup_neo4j_constraints()
@@ -182,10 +203,19 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# CORS — permissive for local/Expo dev; tighten in production
+# CORS — explicit origins for dev + production
+ALLOWED_ORIGINS = [
+    "http://localhost:8081",
+    "http://localhost:19006",
+    "http://127.0.0.1:8081",
+    "http://127.0.0.1:19006",
+    "https://spillthereel-caa31.web.app",
+    "https://spillthereel-caa31.firebaseapp.com",
+    "https://trans-dash-waves-cameras.trycloudflare.com",
+]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=ALLOWED_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

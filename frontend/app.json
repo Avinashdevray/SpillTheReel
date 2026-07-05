@@ -22,6 +22,10 @@
     },
     "web": {
       "favicon": "./assets/favicon.png"
-    }
+    },
+    "extra": {
+      "backendUrl": "https://trans-dash-waves-cameras.trycloudflare.com"
+    },
+    "plugins": []
   }
 }
