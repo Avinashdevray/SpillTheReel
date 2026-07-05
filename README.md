@@ -51,6 +51,8 @@
 
 ✓ Turns endless scrolling into searchable knowledge
 
+> **Note:** The backend is not yet deployed to a public server. To use SpillTheReel, you'll need to run it locally.
+
 </td>
 <td valign="top" width="50%" align="center">
   <img src="assets/installguide.gif" alt="Install guide - how to install SpillTheReel PWA" width="300"/>
@@ -58,7 +60,6 @@
 </tr>
 </table>
 
-> **Note:** The backend is not yet deployed to a public server. To use SpillTheReel, you'll need to run it locally.
 
 ### Local Setup
 
