@@ -42,16 +42,10 @@
 
 ## Screenshots
 
-| Ingest a Reel | Search Your Memory |
-|:---:|:---:|
-| <img src="ss1.jpg" alt="Ingesting a Reel" width="300"/> | <img src="ss2.jpg" alt="Searching saved Reels" width="300"/> |
-| Share a URL, AI extracts transcript + visual context | Ask questions, get answers grounded in your reels |
-
-<p align="center">
-  <img src="use.gif" alt="Using SpillTheReel - full walkthrough" width="600"/>
-  <br>
-  <em>Full walkthrough — install → ingest → search</em>
-</p>
+| Ingest a Reel | Search Your Memory | Full Walkthrough |
+|:---:|:---:|:---:|
+| <img src="ss1.jpg" alt="Ingesting a Reel" width="260"/> | <img src="ss2.jpg" alt="Searching saved Reels" width="260"/> | <img src="use.gif" alt="Using SpillTheReel" width="260"/> |
+| Share a URL, AI extracts everything | Ask questions, get grounded answers | Install → ingest → search in 30s |
 
 ---
 
