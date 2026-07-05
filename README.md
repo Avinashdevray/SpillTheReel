@@ -146,6 +146,12 @@ Ask a question → GET /chat?q=...
 
 ---
 
+## Open Source / Cloud Dual Track
+
+SpillTheReel qualifies for both the **Cognee Open Source** and **Cognee Cloud** tracks.  
+Currently running on Cognee Cloud — to switch to the open-source local version, just set up your own LiteLLM provider and toggle one config flag.
+
+---
 
 ## Why Cognee Cloud?
 
